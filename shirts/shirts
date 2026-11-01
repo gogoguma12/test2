@@ -1,0 +1,6 @@
+shirt-app/
+├── index.html
+└── shirts/
+    ├── shirt1.png
+    ├── shirt2.png
+    └── shirt3.png
