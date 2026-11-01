@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>가상 티셔츠 피팅</title>
+<style>
+  body { margin: 0; background: #111; color: #fff; font-family: sans-serif; text-align: center; }
+  #wrap { position: relative; display: inline-block; margin-top: 20px; }
+  video, canvas { width: 640px; height: 480px; border-radius: 12px; }
+  canvas { position: absolute; left: 0; top: 0; }
+  video { transform: scaleX(-1); }   /* 거울 모드 */
+  #status { margin: 10px; color: #aaa; }
+  input { margin: 10px; }
+</style>
+</head>
+<body>
+  <h2>가상 티셔츠 피팅</h2>
+  <div id="status">모델 로딩 중... (카메라 허용해주세요)</div>
+  <div><button id="randomBtn">🎲 랜덤 티셔츠</button></div>
+  <div>위아래 조절: <input type="range" id="offsetY" min="-0.3" max="0.3" step="0.01" value="0.05"></div>
+  <div id="wrap">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas" width="640" height="480"></canvas>
+  </div>
+
+<script type="module">
+import { PoseLandmarker, FilesetResolver } from
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const statusEl = document.getElementById("status");
+
+// ---------- 티셔츠 이미지 ----------
+// 기본값: 코드로 그린 간단한 티셔츠 (배경 투명 PNG를 업로드하면 교체됨)
+const shirt = new Image();
+shirt.src = makeDefaultShirt();
+// 사용할 이미지 목록 (shirts 폴더에 넣은 파일 이름과 똑같이 적어요)
+const shirtList = [
+  "shirts/shirt1.png",
+  "shirts/shirt2.png",
+  "shirts/shirt3.png"
+];
+
+let lastIndex = -1;
+function pickRandomShirt() {
+  let i;
+  do {
+    i = Math.floor(Math.random() * shirtList.length);
+  } while (i === lastIndex && shirtList.length > 1); // 같은 거 연속 방지
+  lastIndex = i;
+  shirt.src = shirtList[i];
+}
+
+document.getElementById("randomBtn").addEventListener("click", pickRandomShirt);
+pickRandomShirt(); // 처음 시작할 때도 랜덤으로 하나 띄우기
+
+function makeDefaultShirt() {
+  const c = document.createElement("canvas");
+  c.width = 400; c.height = 450;
+  const g = c.getContext("2d");
+  g.fillStyle = "#e63946";
+  g.beginPath();
+  g.moveTo(120, 20); g.lineTo(160, 40);
+  g.quadraticCurveTo(200, 80, 240, 40);
+  g.lineTo(280, 20); g.lineTo(390, 100); g.lineTo(340, 190);
+  g.lineTo(300, 165); g.lineTo(300, 440); g.lineTo(100, 440);
+  g.lineTo(100, 165); g.lineTo(60, 190); g.lineTo(10, 100);
+  g.closePath(); g.fill();
+  g.fillStyle = "#fff"; g.font = "bold 40px sans-serif"; g.textAlign = "center";
+  g.fillText("HELLO", 200, 250);
+  return c.toDataURL();
+}
+
+// ---------- MediaPipe 설정 ----------
+const vision = await FilesetResolver.forVisionTasks(
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+);
+const poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+  baseOptions: {
+    modelAssetPath:
+      "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+    delegate: "GPU"
+  },
+  runningMode: "VIDEO",
+  numPoses: 1
+});
+
+// ---------- 카메라 ----------
+const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+video.srcObject = stream;
+await new Promise(r => (video.onloadeddata = r));
+statusEl.textContent = "카메라를 보고 서보세요! 어깨와 엉덩이가 보여야 해요.";
+
+// ---------- 부드럽게 만들기 (떨림 방지) ----------
+const smooth = { cx: 0, cy: 0, w: 0, h: 0, angle: 0, init: false };
+const lerp = (a, b, t) => a + (b - a) * t;
+
+// ---------- 메인 루프 ----------
+let lastTime = -1;
+function loop() {
+  if (video.currentTime !== lastTime) {
+    lastTime = video.currentTime;
+    const result = poseLandmarker.detectForVideo(video, performance.now());
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (result.landmarks.length > 0) {
+      const lm = result.landmarks[0];
+      // 11,12 = 어깨 / 23,24 = 엉덩이 (좌우 반전 거울 모드라 x를 뒤집음)
+      const P = i => ({ x: (1 - lm[i].x) * canvas.width, y: lm[i].y * canvas.height });
+      const lS = P(11), rS = P(12), lH = P(23), rH = P(24);
+
+      const shoulderMid = { x: (lS.x + rS.x) / 2, y: (lS.y + rS.y) / 2 };
+      const hipMid      = { x: (lH.x + rH.x) / 2, y: (lH.y + rH.y) / 2 };
+
+      const shoulderW = Math.hypot(lS.x - rS.x, lS.y - rS.y);
+      const torsoH    = Math.hypot(shoulderMid.x - hipMid.x, shoulderMid.y - hipMid.y);
+      // 몸통 기울기
+      const angle = Math.atan2(rS.y - lS.y, rS.x - lS.x);
+
+      // 티셔츠 크기: 어깨너비의 약 1.9배 (소매 포함), 높이는 몸통 길이 기준
+      const targetW = shoulderW * 1.9;
+      const targetH = torsoH * 1.25;
+      const cx = (shoulderMid.x + hipMid.x) / 2;
+      const offsetY = parseFloat(document.getElementById("offsetY").value);
+      const cy = (shoulderMid.y + hipMid.y) / 2 - torsoH * offsetY;
+
+
+      if (!smooth.init) { Object.assign(smooth, { cx, cy, w: targetW, h: targetH, angle, init: true }); }
+      const t = 0.35; // 작을수록 부드럽고 느림
+      smooth.cx = lerp(smooth.cx, cx, t);
+      smooth.cy = lerp(smooth.cy, cy, t);
+      smooth.w  = lerp(smooth.w, targetW, t);
+      smooth.h  = lerp(smooth.h, targetH, t);
+      smooth.angle = lerp(smooth.angle, angle, t);
+
+      ctx.save();
+      ctx.translate(smooth.cx, smooth.cy);
+      ctx.rotate(smooth.angle);
+      ctx.drawImage(shirt, -smooth.w / 2, -smooth.h / 2, smooth.w, smooth.h);
+      ctx.restore();
+    }
+  }
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
